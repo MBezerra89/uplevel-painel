@@ -44,6 +44,16 @@
     - preco = preço de mercado / expectativa de venda (não é o valor
       realmente cobrado — isso fica registrado em cada venda)
 
+  CATÁLOGO PÚBLICO (coleção "catalog") — espelho automático:
+    Toda vez que um item é salvo (saveItemDoc) ou tem a quantidade
+    alterada por uma movimentação, um espelho seguro dele é gravado aqui
+    por syncCatalogDoc(). É essa coleção que a homepage pública (index.html)
+    lê — sem login — para montar a vitrine. NUNCA contém custo.
+    {
+      nome, categoria, marca, modelo, variacao, preco, obs, imagem,
+      disponivel   // true/false — nunca a quantidade exata
+    }
+
   MOVIMENTAÇÃO (coleção "movements"):
     entrada (compra):
     {
@@ -910,14 +920,42 @@ async function seedIfEmpty(){
 // só os campos passados em "data" sejam alterados — o resto do documento
 // permanece intacto (usado, por exemplo, quando uma venda só precisa
 // atualizar qtd e custo, sem reescrever nome/marca/modelo etc.)
+// Depois de gravar, sempre atualiza o espelho público em "catalog".
 async function saveItemDoc(id, data){
-  try{ await db.collection('inventory').doc(id).set(data, {merge:true}); }
+  try{
+    await db.collection('inventory').doc(id).set(data, {merge:true});
+    const atualizado = await db.collection('inventory').doc(id).get();
+    await syncCatalogDoc(id, atualizado.data());
+  }
   catch(e){ console.error(e); toast('Erro ao salvar. Tente novamente.'); }
 }
-// Remove um item do estoque. Não apaga o histórico de movimentações dele.
+// Remove um item do estoque (e o espelho dele no catálogo público).
+// Não apaga o histórico de movimentações dele.
 async function deleteItemDoc(id){
-  try{ await db.collection('inventory').doc(id).delete(); }
+  try{
+    await db.collection('inventory').doc(id).delete();
+    await db.collection('catalog').doc(id).delete();
+  }
   catch(e){ console.error(e); toast('Erro ao excluir. Tente novamente.'); }
+}
+// Espelha só os dados SEGUROS de um item para a coleção pública "catalog"
+// (lida sem login pela homepage) — nunca inclui custo. "disponivel" vira
+// true/false a partir da quantidade, sem expor o número exato do estoque.
+async function syncCatalogDoc(id, item){
+  if(!item) return;
+  const dadosPublicos = {
+    nome: item.nome || '',
+    categoria: item.categoria || '',
+    marca: item.marca || '',
+    modelo: item.modelo || '',
+    variacao: item.variacao || '',
+    preco: item.preco || 0,
+    obs: item.obs || '',
+    imagem: item.imagem || '',
+    disponivel: (item.qtd || 0) > 0
+  };
+  try{ await db.collection('catalog').doc(id).set(dadosPublicos); }
+  catch(e){ console.error('Erro ao sincronizar catálogo público', e); }
 }
 // Grava/atualiza uma movimentação (entrada ou saída) na coleção "movements"
 async function saveMovementDoc(id, data){

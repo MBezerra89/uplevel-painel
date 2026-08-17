@@ -1,4 +1,74 @@
 <!DOCTYPE html>
+<!--
+  ============================================================================
+  UPLEVEL · PAINEL DE ESTOQUE & MARGEM
+  ============================================================================
+  O que é: painel de controle de estoque, custo e margem da UpLevel Tech &
+  Solutions. Cadastro de itens, registro de compras (entrada) e vendas
+  (saída), cálculo automático de custo médio e margem, e insights de giro
+  de estoque (o que está parado x o que está vendendo rápido).
+
+  Stack: HTML + CSS + JavaScript puro (sem framework, sem etapa de build).
+  Banco de dados: Firebase Firestore (tempo real, sincroniza entre
+  dispositivos). Login: Firebase Authentication (e-mail/senha).
+
+  Estrutura do arquivo:
+    1. <style>            → todo o CSS (design tokens em :root, depois
+                             layout, componentes e modais)
+    2. <body>
+       - #appRoot          → o painel em si (só aparece após login)
+       - #loginScreen      → tela de login, mostrada quando não autenticado
+    3. Scripts do Firebase → SDK + configuração da conexão com o projeto
+    4. <script> principal  → toda a lógica da aplicação, dividida em:
+       - STATE             → variáveis globais (inventory, movements...)
+       - AUTH              → login/logout
+       - FIRESTORE         → leitura em tempo real + gravação de documentos
+       - TABS              → troca entre as abas Visão Geral/Estoque/Movimentações
+       - RENDER: DASHBOARD  → cards, insights e giro de estoque
+       - RENDER: INVENTORY  → tabela de itens em estoque
+       - RENDER: MOVEMENTS  → tabela de entradas/saídas
+       - ITEM MODAL         → cadastro/edição de item (com atributos extras)
+       - MOVEMENT MODAL     → registro de compra/venda (com custos
+                               adicionais e dados do fornecedor)
+
+  Modelo de dados (documentos salvos no Firestore):
+
+  ITEM (coleção "inventory"):
+    {
+      id, nome, marca, modelo, variacao,
+      atributos: [{chave, valor}, ...],   // ex: {chave:"Cor", valor:"Preto"}
+      categoria, qtd, custo, preco, min, obs
+    }
+    - custo = custo médio ponderado por unidade, já incluindo custos
+      adicionais das compras (frete, gasolina, uber etc.)
+    - preco = preço de mercado / expectativa de venda (não é o valor
+      realmente cobrado — isso fica registrado em cada venda)
+
+  MOVIMENTAÇÃO (coleção "movements"):
+    entrada (compra):
+    {
+      id, itemId, itemNome, tipo:'entrada', qtd,
+      valorUnit,               // custo do produto em si, por unidade
+      custosAdicionais: [{descricao, valor}, ...],  // frete, gasolina...
+      custoEfetivoUnitario,    // (valorUnit*qtd + soma dos adicionais) / qtd
+      fornecedor: {nome, contato},
+      data, obs
+    }
+    saída (venda):
+    {
+      id, itemId, itemNome, tipo:'saida', qtd,
+      valorUnit,                // valor de venda BRUTO cobrado do cliente
+      taxas,                     // taxas/comissão da plataforma nessa venda (R$)
+      plataforma,                // de onde veio a venda: Mercado Livre / OLX / WhatsApp / Outro
+      contaRecebimento,          // em qual conta o dinheiro entrou: Mercado Livre / OLX / Itaú / Outro
+      cliente: {nome, telefone}, // obrigatório em toda venda
+      custoNaEpoca,              // custo médio do item no momento da venda
+                                  // (fica "congelado" para a margem histórica
+                                  // não mudar quando o custo atual mudar)
+      data, obs
+    }
+  ============================================================================
+-->
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
@@ -7,20 +77,29 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
+  /* ---- Design tokens: cores, espaçamento base. Mudar aqui reflete no app inteiro. ----
+     Paleta alinhada ao logo da UpLevel (azul elétrico + prata metálico sobre preto).
+     --gold e --pcb são cores SEMÂNTICAS reservadas para as ações de Entrada
+     (compra = amarelo) e Venda (saída = verde) — não usar em elementos genéricos. */
   :root{
-    --bg:#14171A;
-    --panel:#1C2124;
-    --panel-2:#20262A;
-    --line:#2B3236;
-    --pcb:#2F5D46;
-    --pcb-bright:#3F7D5F;
-    --gold:#C9A227;
-    --gold-soft:#8A7433;
-    --text:#E7E9E6;
-    --text-dim:#9BA3A0;
-    --profit:#4CAF7D;
-    --loss:#E1685A;
-    --radius:10px;
+    --bg:#0A0D12;          /* fundo geral da página — preto levemente azulado, como o logo */
+    --panel:#12161D;       /* fundo dos cards/painéis */
+    --panel-2:#171D26;     /* fundo de inputs e elementos "dentro" de um painel */
+    --line:#232B36;        /* bordas discretas */
+    --blue:#1F7AE0;        /* azul de marca (accent principal, tirado do anel do logo) */
+    --blue-bright:#33D7FF; /* ciano brilhante (tirado do brilho azul das letras do logo) */
+    --blue-light:#DCEEFF;  /* azul quase branco — usado em TEXTO, para garantir leitura fácil */
+    --silver:#C7CFD6;      /* prata metálico (tirado das letras "Up" do logo) */
+    --silver-dim:#8892A0;  /* prata escurecido, para texto secundário sobre prata */
+    --pcb:#2FA36B;         /* verde — cor semântica de VENDA/SAÍDA */
+    --pcb-bright:#3FCB84;  /* verde claro — hover/gradiente de venda */
+    --gold:#E0B23A;        /* amarelo — cor semântica de ENTRADA/COMPRA */
+    --gold-soft:#B08A2A;   /* amarelo escurecido — bordas/hover de entrada */
+    --text:#E7ECF1;        /* texto principal */
+    --text-dim:#93A0AC;    /* texto secundário/legendas */
+    --profit:#4CAF7D;      /* verde de lucro positivo */
+    --loss:#E1685A;        /* vermelho de prejuízo/alerta */
+    --radius:10px;         /* raio de borda padrão dos cards */
   }
   *{box-sizing:border-box;}
   body{
@@ -31,9 +110,9 @@
     -webkit-font-smoothing:antialiased;
   }
   h1,h2,h3,.display{font-family:'Space Grotesk',sans-serif;}
-  ::selection{background:var(--gold-soft);color:#111;}
+  ::selection{background:var(--blue);color:#fff;}
 
-  /* ---- Pin connector signature ---- */
+  /* ---- Pin connector signature: metal prateado com brilho azul, ecoando o logo ---- */
   .pins{
     display:flex;
     height:10px;
@@ -42,7 +121,7 @@
   }
   .pins span{
     flex:1;
-    background:linear-gradient(180deg,#E8C860,#B0913A 60%,#7A6626);
+    background:linear-gradient(180deg,#DCE6F0,#6FA0D0 55%,#1F4C77);
     margin-right:2px;
     border-radius:0 0 2px 2px;
   }
@@ -57,14 +136,14 @@
     display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
   }
   .brand{display:flex;align-items:center;gap:12px;}
+  /* .mark agora recebe a logomarca real (imagem), com leve halo azul lembrando o glow do logo */
   .brand .mark{
-    width:38px;height:38px;border-radius:8px;
-    background:linear-gradient(135deg,var(--pcb),var(--pcb-bright));
-    display:flex;align-items:center;justify-content:center;
-    border:1px solid #3f8a63;
+    width:56px;height:56px;border-radius:50%;
+    overflow:hidden;flex-shrink:0;
+    box-shadow:0 0 0 1px var(--blue), 0 0 14px rgba(51,215,255,.4);
   }
-  .brand .mark svg{width:20px;height:20px;}
-  .brand h1{font-size:18px;margin:0;letter-spacing:.2px;}
+  .brand .mark img{width:100%;height:100%;object-fit:cover;display:block;}
+  .brand h1{font-size:19px;margin:0;letter-spacing:.2px;}
   .brand .sub{font-size:12px;color:var(--text-dim);margin-top:1px;}
 
   nav.tabs{
@@ -77,7 +156,7 @@
     padding:12px 14px;cursor:pointer;border-bottom:2px solid transparent;
     letter-spacing:.2px;
   }
-  nav.tabs button.active{color:var(--text);border-bottom-color:var(--gold);}
+  nav.tabs button.active{color:var(--text);border-bottom-color:var(--blue-bright);}
   nav.tabs button:hover{color:var(--text);}
 
   main{max-width:1180px;margin:0 auto;padding:24px 20px 60px;}
@@ -85,18 +164,22 @@
   .view.active{display:block;}
 
   .grid-cards{
-    display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
-    gap:12px;margin-bottom:22px;
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:10px;margin-bottom:22px;
+  }
+  /* Em telas largas o suficiente, força as 6 métricas numa linha só */
+  @media (min-width:900px){
+    .grid-cards{grid-template-columns:repeat(7,1fr);}
   }
   .card{
     background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-    padding:16px;
+    padding:13px;
   }
-  .card .label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;}
-  .card .value{font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:700;}
+  .card .label{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;line-height:1.3;}
+  .card .value{font-family:'Space Grotesk',sans-serif;font-size:19px;font-weight:700;white-space:nowrap;}
   .card .value.profit{color:var(--profit);}
   .card .value.loss{color:var(--loss);}
-  .card .sub{font-size:11.5px;color:var(--text-dim);margin-top:4px;}
+  .card .sub{font-size:10.5px;color:var(--text-dim);margin-top:4px;line-height:1.3;}
 
   .panel{
     background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
@@ -104,8 +187,8 @@
   }
   .panel h2{font-size:15px;margin:0 0 12px;display:flex;align-items:center;gap:8px;}
   .panel h2 .tag{
-    font-size:10px;background:var(--panel-2);color:var(--gold);border:1px solid var(--gold-soft);
-    padding:2px 6px;border-radius:4px;font-family:'IBM Plex Mono',monospace;letter-spacing:.4px;
+    font-size:10px;background:rgba(31,122,224,.28);color:var(--blue-light);border:1px solid var(--blue-bright);
+    padding:2px 6px;border-radius:4px;font-family:'IBM Plex Mono',monospace;letter-spacing:.4px;font-weight:600;
   }
 
   .insight-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px;}
@@ -113,9 +196,9 @@
     font-size:13px;line-height:1.5;padding-left:16px;position:relative;color:var(--text);
   }
   .insight-list li::before{
-    content:'';position:absolute;left:0;top:6px;width:6px;height:6px;background:var(--gold);border-radius:1px;
+    content:'';position:absolute;left:0;top:6px;width:6px;height:6px;background:var(--blue-bright);border-radius:1px;
   }
-  .insight-list li b{color:var(--gold);}
+  .insight-list li b{color:var(--blue-light);}
 
   table{width:100%;border-collapse:collapse;font-size:12.5px;}
   th{
@@ -140,7 +223,7 @@
     border-radius:6px;padding:4px 7px;font-size:11px;cursor:pointer;margin-right:4px;
     font-family:'IBM Plex Mono',monospace;
   }
-  .row-actions button:hover{color:var(--text);border-color:var(--gold-soft);}
+  .row-actions button:hover{color:var(--text);border-color:var(--blue);}
 
   .btn{
     background:linear-gradient(135deg,var(--pcb),var(--pcb-bright));
@@ -153,11 +236,16 @@
     background:var(--panel-2);color:var(--text);border:1px solid var(--line);
   }
   .btn.gold{
-    background:linear-gradient(135deg,#C9A227,#8A7433);color:#1A1500;border:1px solid #8A7433;
+    background:linear-gradient(135deg,var(--gold),var(--gold-soft));color:#1A1500;border:1px solid var(--gold-soft);
+  }
+  /* .btn.blue — ação neutra em azul de marca, para botões que não são nem entrada nem venda */
+  .btn.blue{
+    background:linear-gradient(135deg,var(--blue),var(--blue-bright));color:#04131F;border:1px solid var(--blue);
   }
 
   .toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:10px;flex-wrap:wrap;}
 
+  /* ---- Campos de formulário (inputs, selects, textareas) usados em todos os modais ---- */
   .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;}
   .field{display:flex;flex-direction:column;gap:5px;}
   .field label{font-size:10.5px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;}
@@ -166,8 +254,9 @@
     color:var(--text);padding:8px 9px;font-family:'IBM Plex Mono',monospace;font-size:12.5px;
   }
   .field textarea{resize:vertical;min-height:44px;}
-  .field input:focus, .field select:focus, .field textarea:focus{outline:1px solid var(--gold-soft);}
+  .field input:focus, .field select:focus, .field textarea:focus{outline:1px solid var(--blue);}
 
+  /* ---- Modal genérico (usado tanto no cadastro de item quanto no de movimentação) ---- */
   .modal-backdrop{
     display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);
     align-items:center;justify-content:center;z-index:50;padding:20px;
@@ -185,28 +274,60 @@
   }
   .empty .mark{margin:0 auto 12px;}
 
+  /* ---- Botões "Entrada / Saída" no topo do modal de movimentação ---- */
   .movement-type-toggle{display:flex;gap:8px;margin-bottom:14px;}
   .movement-type-toggle button{
     flex:1;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--panel-2);
     color:var(--text-dim);font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:13px;cursor:pointer;
   }
-  .movement-type-toggle button.active.entrada{border-color:var(--pcb-bright);color:var(--pcb-bright);background:rgba(63,125,95,.12);}
-  .movement-type-toggle button.active.saida{border-color:var(--gold);color:var(--gold);background:rgba(201,162,39,.1);}
+  .movement-type-toggle button.active.entrada{border-color:var(--gold);color:var(--gold);background:rgba(224,178,58,.12);}
+  .movement-type-toggle button.active.saida{border-color:var(--pcb-bright);color:var(--pcb-bright);background:rgba(63,203,132,.12);}
 
+  /* ---- Notificação flutuante (aparece embaixo por 2,2s após salvar/excluir) ---- */
   #toast{
     position:fixed;bottom:18px;left:50%;transform:translateX(-50%) translateY(20px);
-    background:var(--panel-2);border:1px solid var(--gold-soft);color:var(--text);
+    background:var(--panel-2);border:1px solid var(--blue);color:var(--text);
     padding:10px 16px;border-radius:8px;font-size:12.5px;opacity:0;pointer-events:none;
     transition:all .25s ease;z-index:100;
   }
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 
+  /* ---- Botões de link da tela de login (site / WhatsApp) ---- */
+  .login-links{
+    display:flex;flex-direction:column;gap:8px;margin-top:18px;padding-top:16px;
+    border-top:1px solid var(--line);
+  }
+  .login-link-btn{
+    display:flex;align-items:center;justify-content:center;gap:8px;
+    background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+    padding:10px 14px;color:var(--blue-light);font-size:12.5px;font-weight:600;
+    font-family:'Space Grotesk',sans-serif;text-decoration:none;
+    transition:border-color .15s ease, transform .1s ease, background .15s ease;
+  }
+  .login-link-btn:hover{border-color:var(--blue-bright);background:rgba(31,122,224,.14);}
+  .login-link-btn:active{transform:scale(.97);}
+  .login-link-btn svg{flex-shrink:0;}
+
+  /* ---- Responsivo: em telas estreitas, as tabelas viram "cards" empilhados ---- */
   @media (max-width:640px){
     table, thead, tbody, th, td, tr{display:block;}
     thead{display:none;}
     tr{border-bottom:1px solid var(--line);padding:10px 0;}
     td{border:none;padding:3px 0;display:flex;justify-content:space-between;}
     td::before{content:attr(data-label);color:var(--text-dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;}
+  }
+
+  /* ---- Responsivo: celulares bem estreitos (ex: iPhone SE, ~375px) ---- */
+  @media (max-width:400px){
+    .header-inner{padding:14px 14px 12px;gap:10px;}
+    .brand h1{font-size:16px;}
+    .brand .mark{width:44px;height:44px;}
+    nav.tabs{padding:0 14px;overflow-x:auto;}
+    nav.tabs button{padding:10px 10px;font-size:12.5px;white-space:nowrap;}
+    main{padding:16px 14px 50px;}
+    .modal{padding:16px;}
+    #loginScreen .panel{padding:20px 16px;}
+    #loginScreen .mark{width:64px !important;height:64px !important;}
   }
 </style>
 </head>
@@ -218,18 +339,16 @@
   <div class="header-inner">
     <div class="brand">
       <div class="mark">
-        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="3" y="7" width="18" height="10" rx="1.5" stroke="#EFFFF6" stroke-width="1.6"/>
-          <path d="M6 7V4M9 7V4M12 7V4M15 7V4M18 7V4" stroke="#EFFFF6" stroke-width="1.6" stroke-linecap="round"/>
-        </svg>
+        <img class="logo-img" alt="UpLevel Tech & Solutions">
       </div>
       <div>
-        <h1>UpLevel · Painel de Estoque & Margem</h1>
+        <h1>UpLevel Tech & Solutions</h1>
         <div class="sub" id="loggedUserLabel">Memórias ECC · Peças de servidor & workstation</div>
       </div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <button class="btn gold" onclick="openMovementModal('entrada')">+ Entrada (compra)</button>
+      <button class="btn" onclick="openMovementModal('saida')">+ Venda (saída)</button>
       <button class="btn secondary" onclick="doLogout()">Sair</button>
     </div>
   </div>
@@ -257,6 +376,20 @@
       </div>
       <div id="lowStockTableWrap"></div>
     </div>
+
+    <div class="panel">
+      <div class="toolbar">
+        <h2 style="margin:0;">Parado há mais tempo <span class="tag">sem venda</span></h2>
+      </div>
+      <div id="paradoTableWrap"></div>
+    </div>
+
+    <div class="panel">
+      <div class="toolbar">
+        <h2 style="margin:0;">Vendendo bem — considere repor <span class="tag">giro alto</span></h2>
+      </div>
+      <div id="repoTableWrap"></div>
+    </div>
   </section>
 
   <!-- ESTOQUE -->
@@ -276,46 +409,99 @@
       <div class="toolbar">
         <h2 style="margin:0;">Histórico de entradas e saídas</h2>
         <div style="display:flex;gap:8px;">
-          <button class="btn secondary" onclick="openMovementModal('entrada')">+ Entrada</button>
-          <button class="btn gold" onclick="openMovementModal('saida')">+ Venda (saída)</button>
+          <button class="btn gold" onclick="openMovementModal('entrada')">+ Entrada</button>
+          <button class="btn" onclick="openMovementModal('saida')">+ Venda (saída)</button>
         </div>
       </div>
       <div id="movementsTableWrap"></div>
+    </div>
+
+    <div class="panel" style="border-color:rgba(225,104,90,.35);">
+      <h2 style="margin:0 0 6px;color:var(--loss);">Zona de risco</h2>
+      <p style="font-size:12.5px;color:var(--text-dim);margin:0 0 12px;line-height:1.6;">
+        Apaga TODO o histórico de movimentações e zera a quantidade/custo de todos os itens do estoque
+        (os cadastros dos itens — nome, marca, modelo, preço — continuam intactos, só o estoque acumulado volta a zero).
+        Use isso pra encerrar os testes e começar a registrar dados reais do zero. <b>Não tem como desfazer.</b>
+      </p>
+      <button class="btn secondary" style="border-color:var(--loss);color:var(--loss);" onclick="resetMovimentacoes()">Zerar movimentações e estoque</button>
     </div>
   </section>
 
 </main>
 
-<!-- ITEM MODAL -->
+<!--
+  MODAL DE ITEM — cadastro/edição de um produto no estoque (aba Estoque).
+  Preenchido por openItemModal() e salvo por saveItem().
+  Os "Atributos extras" (chave/valor) são gerados dinamicamente por
+  addAtributoRow() e permitem descrever qualquer categoria de produto
+  (cor, armazenamento, edição, estado da caixa...) sem precisar de campos
+  fixos para cada tipo de item.
+-->
 <div class="modal-backdrop" id="itemModalBackdrop">
   <div class="modal">
     <h3 id="itemModalTitle">Novo item</h3>
     <div class="form-grid">
       <div class="field">
         <label>Tipo do item</label>
-        <select id="f-categoria">
-          <option>RAM ECC RDIMM</option>
-          <option>RAM ECC UDIMM</option>
-          <option>RAM Desktop</option>
-          <option>SSD</option>
-          <option>HD</option>
-          <option>Placa-mãe</option>
-          <option>Processador</option>
-          <option>Kit X99</option>
-          <option>Outro</option>
+        <select id="f-categoria-select" onchange="toggleOutro('f-categoria')">
+          <option value="">Selecione...</option>
+          <optgroup label="Servidor / Workstation">
+            <option>RAM ECC RDIMM</option>
+            <option>RAM ECC UDIMM</option>
+            <option>RAM Desktop</option>
+            <option>SSD</option>
+            <option>HD</option>
+            <option>Placa-mãe</option>
+            <option>Processador</option>
+            <option>Kit X99</option>
+          </optgroup>
+          <optgroup label="Outras categorias">
+            <option>Smartphone</option>
+            <option>Videogame / Console</option>
+            <option>Jogo</option>
+            <option>Colecionável / Geek</option>
+            <option>Acessório</option>
+          </optgroup>
+          <option value="__outro__">Outro (especificar)</option>
         </select>
+        <input id="f-categoria-outro" placeholder="Digite o tipo do item" style="display:none;margin-top:6px;">
       </div>
       <div class="field">
         <label>Marca</label>
-        <input id="f-marca" placeholder="Ex: SK Hynix">
+        <select id="f-marca-select" onchange="toggleOutro('f-marca')">
+          <option value="">Selecione...</option>
+          <option>SK Hynix</option>
+          <option>Micron</option>
+          <option>Samsung</option>
+          <option>Kingston</option>
+          <option>Crucial</option>
+          <option>ADATA</option>
+          <option>Corsair</option>
+          <option>Western Digital</option>
+          <option>Seagate</option>
+          <option>Apple</option>
+          <option>Sony</option>
+          <option>Microsoft</option>
+          <option>Nintendo</option>
+          <option>Motorola</option>
+          <option>Xiaomi</option>
+          <option>LG</option>
+          <option value="__outro__">Outro (especificar)</option>
+        </select>
+        <input id="f-marca-outro" placeholder="Digite a marca" style="display:none;margin-top:6px;">
       </div>
       <div class="field">
         <label>Modelo</label>
-        <input id="f-modelo" placeholder="Ex: 16GB DDR4 2400T ECC RDIMM">
+        <input id="f-modelo" list="modelo-list" placeholder="Ex: DDR4 2133MHz 1Rx4">
       </div>
       <div class="field" style="grid-column:1/-1;">
         <label>Variação / especificação (capacidade, clock, rank...)</label>
         <input id="f-variacao" placeholder="Ex: 32GB, 2133MHz, 2400MHz, 1Rx4, 2Rx4...">
+      </div>
+      <div class="field" style="grid-column:1/-1;">
+        <label>Atributos extras (cor, armazenamento, edição, estado da caixa...)</label>
+        <div id="f-atributos-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+        <button type="button" class="btn secondary" style="width:fit-content;padding:6px 12px;font-size:12px;" onclick="addAtributoRow()">+ Adicionar atributo</button>
       </div>
       <div class="field">
         <label>Quantidade em estoque</label>
@@ -345,7 +531,16 @@
   </div>
 </div>
 
-<!-- MOVEMENT MODAL -->
+<!--
+  MODAL DE MOVIMENTAÇÃO — registra uma ENTRADA (compra) ou SAÍDA (venda).
+  Controlado por setMoveType() / openMovementModal() / saveMovement().
+
+  Blocos que aparecem/somem conforme o tipo escolhido:
+  - #m-new-item-fields → só quando o item selecionado é "+ Cadastrar novo
+    item" (cadastro rápido direto na tela de entrada)
+  - #m-plataforma-field → só na venda (onde foi vendido)
+  - #m-entrada-extra → só na entrada (custos adicionais + fornecedor)
+-->
 <div class="modal-backdrop" id="moveModalBackdrop">
   <div class="modal">
     <h3 id="moveModalTitle">Registrar movimentação</h3>
@@ -365,25 +560,56 @@
       <div class="form-grid">
         <div class="field">
           <label>Tipo do item</label>
-          <select id="m-new-categoria">
-            <option>RAM ECC RDIMM</option>
-            <option>RAM ECC UDIMM</option>
-            <option>RAM Desktop</option>
-            <option>SSD</option>
-            <option>HD</option>
-            <option>Placa-mãe</option>
-            <option>Processador</option>
-            <option>Kit X99</option>
-            <option>Outro</option>
+          <select id="m-new-categoria-select" onchange="toggleOutro('m-new-categoria')">
+            <option value="">Selecione...</option>
+            <optgroup label="Servidor / Workstation">
+              <option>RAM ECC RDIMM</option>
+              <option>RAM ECC UDIMM</option>
+              <option>RAM Desktop</option>
+              <option>SSD</option>
+              <option>HD</option>
+              <option>Placa-mãe</option>
+              <option>Processador</option>
+              <option>Kit X99</option>
+            </optgroup>
+            <optgroup label="Outras categorias">
+              <option>Smartphone</option>
+              <option>Videogame / Console</option>
+              <option>Jogo</option>
+              <option>Colecionável / Geek</option>
+              <option>Acessório</option>
+            </optgroup>
+            <option value="__outro__">Outro (especificar)</option>
           </select>
+          <input id="m-new-categoria-outro" placeholder="Digite o tipo do item" style="display:none;margin-top:6px;">
         </div>
         <div class="field">
           <label>Marca</label>
-          <input id="m-new-marca" placeholder="Ex: SK Hynix">
+          <select id="m-new-marca-select" onchange="toggleOutro('m-new-marca')">
+            <option value="">Selecione...</option>
+            <option>SK Hynix</option>
+            <option>Micron</option>
+            <option>Samsung</option>
+            <option>Kingston</option>
+            <option>Crucial</option>
+            <option>ADATA</option>
+            <option>Corsair</option>
+            <option>Western Digital</option>
+            <option>Seagate</option>
+            <option>Apple</option>
+            <option>Sony</option>
+            <option>Microsoft</option>
+            <option>Nintendo</option>
+            <option>Motorola</option>
+            <option>Xiaomi</option>
+            <option>LG</option>
+            <option value="__outro__">Outro (especificar)</option>
+          </select>
+          <input id="m-new-marca-outro" placeholder="Digite a marca" style="display:none;margin-top:6px;">
         </div>
         <div class="field">
           <label>Modelo</label>
-          <input id="m-new-modelo" placeholder="Ex: 16GB DDR4 2400T ECC RDIMM">
+          <input id="m-new-modelo" list="modelo-list" placeholder="Ex: DDR4 2133MHz 1Rx4">
         </div>
         <div class="field" style="grid-column:1/-1;">
           <label>Variação / especificação (capacidade, clock, rank...)</label>
@@ -409,8 +635,12 @@
         <label id="m-preco-label">Valor unitário (R$)</label>
         <input id="m-preco" type="number" min="0" step="0.01" placeholder="0,00">
       </div>
+      <div class="field" id="m-taxas-field" style="display:none;">
+        <label>Taxas da venda (R$)</label>
+        <input id="m-taxas" type="number" min="0" step="0.01" placeholder="Ex: 100,00">
+      </div>
       <div class="field" id="m-plataforma-field" style="display:none;">
-        <label>Plataforma</label>
+        <label>De onde veio a venda</label>
         <select id="m-plataforma">
           <option>Mercado Livre</option>
           <option>OLX</option>
@@ -422,17 +652,72 @@
         <label>Data</label>
         <input id="m-data" type="date">
       </div>
+    </div>
+
+    <div id="m-venda-extra" style="display:none;margin-top:12px;padding:12px;border:1px dashed var(--line);border-radius:8px;">
+      <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Dados do cliente (obrigatório)</div>
+      <div class="form-grid">
+        <div class="field">
+          <label>Nome do cliente</label>
+          <input id="m-cliente-nome" placeholder="Ex: João Silva">
+        </div>
+        <div class="field">
+          <label>Telefone do cliente</label>
+          <input id="m-cliente-telefone" placeholder="Ex: (11) 90000-0000">
+        </div>
+        <div class="field">
+          <label>Conta onde recebeu o valor</label>
+          <select id="m-conta-select" onchange="toggleOutro('m-conta')">
+            <option value="">Selecione...</option>
+            <option>Mercado Livre</option>
+            <option>OLX</option>
+            <option>Itaú</option>
+            <option value="__outro__">Outro (especificar)</option>
+          </select>
+          <input id="m-conta-outro" placeholder="Digite a conta" style="display:none;margin-top:6px;">
+        </div>
+      </div>
+    </div>
+
+    <div id="m-entrada-extra" style="display:none;margin-top:12px;padding:12px;border:1px dashed var(--line);border-radius:8px;">
+      <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Custos adicionais da compra (frete, gasolina, uber...)</div>
+      <div id="m-custos-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+      <button type="button" class="btn secondary" style="width:fit-content;padding:6px 12px;font-size:12px;margin-bottom:14px;" onclick="addCustoRow()">+ Adicionar custo</button>
+
+      <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Fornecedor</div>
+      <div class="form-grid">
+        <div class="field">
+          <label>Nome do fornecedor</label>
+          <input id="m-fornecedor-nome" placeholder="Ex: Fulano Componentes">
+        </div>
+        <div class="field">
+          <label>Contato (telefone / WhatsApp)</label>
+          <input id="m-fornecedor-contato" placeholder="Ex: (11) 90000-0000">
+        </div>
+      </div>
+
+      <div style="margin-top:10px;font-size:12px;color:var(--text-dim);">
+        Custo efetivo por unidade (produto + custos adicionais): <b id="m-custo-efetivo" style="color:var(--gold);">R$ 0,00</b>
+      </div>
+    </div>
+
+    <div class="form-grid" style="margin-top:12px;">
       <div class="field" style="grid-column:1/-1;">
         <label>Observação (opcional)</label>
-        <input id="m-obs" placeholder="Ex: fornecedor, comprador, número do pedido...">
+        <input id="m-obs" placeholder="Ex: comprador, número do pedido...">
       </div>
     </div>
     <div class="modal-actions">
       <button class="btn secondary" onclick="closeMovementModal()">Cancelar</button>
-      <button class="btn gold" onclick="saveMovement()">Registrar</button>
+      <button class="btn gold" id="btnRegistrar" onclick="saveMovement()">Registrar</button>
     </div>
   </div>
 </div>
+
+<!-- Sugestões de "Modelo" — preenchida dinamicamente com os modelos que
+     você já cadastrou antes (ver refreshModeloDatalist). Compartilhada
+     pelos campos de Modelo do cadastro completo e do cadastro rápido. -->
+<datalist id="modelo-list"></datalist>
 
 <div id="toast"></div>
 
@@ -441,14 +726,14 @@
 <!-- LOGIN SCREEN -->
 <div id="loginScreen" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;">
   <div class="panel" style="max-width:360px;width:100%;">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;">
-      <div class="mark" style="width:34px;height:34px;border-radius:8px;background:linear-gradient(135deg,var(--pcb),var(--pcb-bright));display:flex;align-items:center;justify-content:center;border:1px solid #3f8a63;">
-        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:18px;height:18px;">
-          <rect x="3" y="7" width="18" height="10" rx="1.5" stroke="#EFFFF6" stroke-width="1.6"/>
-          <path d="M6 7V4M9 7V4M12 7V4M15 7V4M18 7V4" stroke="#EFFFF6" stroke-width="1.6" stroke-linecap="round"/>
-        </svg>
+    <div style="display:flex;flex-direction:column;align-items:center;text-align:center;gap:10px;margin-bottom:22px;">
+      <div class="mark" style="width:76px;height:76px;border-radius:50%;overflow:hidden;flex-shrink:0;box-shadow:0 0 0 1px var(--blue), 0 0 18px rgba(51,215,255,.4);">
+        <img class="logo-img" alt="UpLevel Tech & Solutions" style="width:100%;height:100%;object-fit:cover;display:block;">
       </div>
-      <h2 style="margin:0;font-size:16px;">UpLevel · Acesso ao painel</h2>
+      <div>
+        <h2 style="margin:0;font-size:17px;">UpLevel Tech & Solutions</h2>
+        <div style="font-size:11.5px;color:var(--text-dim);margin-top:2px;">Acesso ao painel</div>
+      </div>
     </div>
     <div class="field" style="margin-bottom:10px;">
       <label>E-mail</label>
@@ -458,14 +743,34 @@
       <label>Senha</label>
       <input id="login-senha" type="password" placeholder="••••••••">
     </div>
-    <button class="btn" style="width:100%;" onclick="doLogin()">Entrar</button>
+    <button class="btn blue" style="width:100%;" onclick="doLogin()">Entrar</button>
     <div id="login-error" style="color:var(--loss);font-size:12px;margin-top:10px;display:none;"></div>
-    <div style="font-size:11px;color:var(--text-dim);margin-top:14px;line-height:1.5;">
-      Usuários são cadastrados manualmente no console do Firebase (Authentication → Users). Fale com quem administra o painel para criar seu acesso.
+    <div class="login-links">
+      <a href="https://www.upleveltech.com.br" target="_blank" rel="noopener" class="login-link-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M3 12h18M12 3c2.4 2.6 3.8 5.7 3.8 9s-1.4 6.4-3.8 9c-2.4-2.6-3.8-5.7-3.8-9s1.4-6.4 3.8-9z"/>
+        </svg>
+        upleveltech.com.br
+      </a>
+      <a href="https://wa.me/5511967760775" target="_blank" rel="noopener" class="login-link-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+          <path d="M20 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.2A8 8 0 1 1 20 11.5z"/>
+        </svg>
+        Dúvidas? Fale no WhatsApp
+      </a>
     </div>
   </div>
 </div>
 
+
+<!-- Logomarca da UpLevel, embutida como imagem (base64) para o
+     arquivo continuar funcionando sozinho, sem depender de outro link. -->
+<script>
+  document.querySelectorAll('.logo-img').forEach(img => {
+    img.src = "data:image/webp;base64,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";
+  });
+</script>
 
 <!-- ============================================================
      FIREBASE — substitua o objeto abaixo pelas chaves do SEU
@@ -475,6 +780,9 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script>
+  // Credenciais do projeto Firebase (uplevel-tech). A apiKey de projetos
+  // Firebase é pública por design — quem protege os dados de verdade são
+  // as REGRAS do Firestore (arquivo firestore.rules), não esta chave.
   const firebaseConfig = {
     apiKey: "AIzaSyAIB_lVnNyXn7ZOpNdwJSDg4y2a4qTCHYY",
     authDomain: "uplevel-tech.firebaseapp.com",
@@ -490,18 +798,25 @@
 
 <script>
 // ---------------------------------------------------------------
-// STATE
+// STATE — variáveis globais que guardam os dados carregados do Firestore.
+// São atualizadas automaticamente pelos listeners em tempo real
+// (attachListeners) sempre que algo muda no banco, e usadas por todas
+// as funções de render (renderDashboard, renderInventory, renderMovements).
 // ---------------------------------------------------------------
-let inventory = [];   // {id, nome, categoria, qtd, custo, preco, min, obs}
-let movements = [];   // {id, itemId, itemNome, tipo, qtd, valorUnit, plataforma, data, obs}
-let moveType = 'entrada';
-let editingItemId = null;
-let listenersAttached = false;
+let inventory = [];   // lista de itens do estoque — ver modelo de dados no topo do arquivo
+let movements = [];   // lista de entradas e saídas — ver modelo de dados no topo do arquivo
+let moveType = 'entrada';    // qual aba está ativa no modal de movimentação: 'entrada' ou 'saida'
+let editingItemId = null;    // id do item sendo editado no modal de item (null = criando um novo)
+let listenersAttached = false; // evita registrar os listeners do Firestore mais de uma vez
 
+// Formata número como "1.234,56" (padrão brasileiro)
 const fmt = n => (Number(n)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+// Formata número como "R$ 1.234,56"
 const money = n => 'R$ ' + fmt(n);
+// Gera um id único simples (timestamp + texto aleatório) para novos itens/movimentações
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 
+// Mostra uma notificação temporária no rodapé da tela (2,2 segundos)
 function toast(msg){
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -510,8 +825,11 @@ function toast(msg){
 }
 
 // ---------------------------------------------------------------
-// AUTH
+// AUTH — login/logout via Firebase Authentication (e-mail/senha).
+// Os usuários são cadastrados manualmente no console do Firebase
+// (Authentication → Users), não existe tela de "criar conta" aqui.
 // ---------------------------------------------------------------
+// Tenta autenticar com o e-mail/senha digitados na tela de login.
 async function doLogin(){
   const email = document.getElementById('login-email').value.trim();
   const senha = document.getElementById('login-senha').value;
@@ -525,15 +843,20 @@ async function doLogin(){
     errEl.style.display = 'block';
   }
 }
+// Desconecta o usuário atual (o botão "Sair" no cabeçalho chama esta função)
 function doLogout(){
   auth.signOut();
 }
 
+// Observador global do Firebase: dispara sempre que o estado de login muda
+// (ao entrar, ao sair, ou ao recarregar a página com sessão salva).
+// É aqui que decidimos mostrar o painel ou a tela de login.
 auth.onAuthStateChanged(user=>{
   if(user){
     document.getElementById('loginScreen').style.display = 'none';
     document.getElementById('appRoot').style.display = 'block';
     document.getElementById('loggedUserLabel').textContent = user.email;
+    // Só conecta os listeners do Firestore uma vez, no primeiro login da sessão
     if(!listenersAttached){ attachListeners(); listenersAttached = true; }
   } else {
     document.getElementById('loginScreen').style.display = 'flex';
@@ -542,12 +865,15 @@ auth.onAuthStateChanged(user=>{
 });
 
 // ---------------------------------------------------------------
-// FIRESTORE — leitura em tempo real + gravação por documento
+// FIRESTORE — leitura em tempo real + gravação por documento.
+// Cada onSnapshot() abaixo fica "escutando" a coleção continuamente:
+// qualquer alteração feita por você (ou por outra pessoa logada em
+// outro dispositivo) atualiza a tela sozinha, sem precisar recarregar.
 // ---------------------------------------------------------------
 function attachListeners(){
   db.collection('inventory').onSnapshot(snap=>{
     inventory = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    seedIfEmpty();
+    seedIfEmpty();  // só na primeiríssima vez, se o estoque estiver vazio
     render();
   }, err=>{ console.error(err); toast('Erro ao carregar estoque.'); });
 
@@ -557,6 +883,8 @@ function attachListeners(){
   }, err=>{ console.error(err); toast('Erro ao carregar movimentações.'); });
 }
 
+// Se o estoque estiver totalmente vazio (banco novo), cria um item de
+// exemplo para você não começar com a tela em branco. Roda uma única vez.
 let seeded = false;
 async function seedIfEmpty(){
   if(seeded) return;
@@ -578,25 +906,34 @@ async function seedIfEmpty(){
   }
 }
 
+// Grava/atualiza um item na coleção "inventory". {merge:true} faz com que
+// só os campos passados em "data" sejam alterados — o resto do documento
+// permanece intacto (usado, por exemplo, quando uma venda só precisa
+// atualizar qtd e custo, sem reescrever nome/marca/modelo etc.)
 async function saveItemDoc(id, data){
   try{ await db.collection('inventory').doc(id).set(data, {merge:true}); }
   catch(e){ console.error(e); toast('Erro ao salvar. Tente novamente.'); }
 }
+// Remove um item do estoque. Não apaga o histórico de movimentações dele.
 async function deleteItemDoc(id){
   try{ await db.collection('inventory').doc(id).delete(); }
   catch(e){ console.error(e); toast('Erro ao excluir. Tente novamente.'); }
 }
+// Grava/atualiza uma movimentação (entrada ou saída) na coleção "movements"
 async function saveMovementDoc(id, data){
   try{ await db.collection('movements').doc(id).set(data, {merge:true}); }
   catch(e){ console.error(e); toast('Erro ao salvar. Tente novamente.'); }
 }
+// Remove uma movimentação do histórico (não recalcula o estoque sozinho —
+// por isso o confirm() de aviso antes de chamar esta função)
 async function deleteMovementDoc(id){
   try{ await db.collection('movements').doc(id).delete(); }
   catch(e){ console.error(e); toast('Erro ao excluir. Tente novamente.'); }
 }
 
 // ---------------------------------------------------------------
-// TABS
+// TABS — alterna entre as 3 abas do menu (Visão Geral / Estoque / Movimentações)
+// mostrando/escondendo as <section class="view"> correspondentes.
 // ---------------------------------------------------------------
 document.querySelectorAll('.tab-btn').forEach(btn=>{
   btn.addEventListener('click', ()=>{
@@ -608,7 +945,8 @@ document.querySelectorAll('.tab-btn').forEach(btn=>{
 });
 
 // ---------------------------------------------------------------
-// PIN CONNECTOR SIGNATURE
+// PIN CONNECTOR SIGNATURE — detalhe visual no topo da página, simulando
+// os contatos dourados de um módulo de memória. Puramente decorativo.
 // ---------------------------------------------------------------
 function buildPins(){
   const wrap = document.getElementById('pinsTop');
@@ -623,25 +961,47 @@ buildPins();
 // ---------------------------------------------------------------
 // RENDER: DASHBOARD
 // ---------------------------------------------------------------
+// Calcula todos os números-resumo do negócio a partir de inventory[] e
+// movements[]. Não mexe na tela — só retorna os valores prontos para os
+// cards e para os insights usarem.
 function computeMetrics(){
+  // Quanto dinheiro está "parado" hoje em estoque (soma de qtd × custo de cada item)
   const totalInvestido = inventory.reduce((s,i)=>s + i.qtd*i.custo, 0);
   const vendas = movements.filter(m=>m.tipo==='saida');
   const entradasMv = movements.filter(m=>m.tipo==='entrada');
+  // Receita = soma do valor real de venda de cada movimentação de saída (valor BRUTO, antes das taxas)
   const receitaTotal = vendas.reduce((s,m)=>s + m.qtd*m.valorUnit, 0);
+  // Taxas pagas às plataformas (comissão do Mercado Livre, por exemplo)
+  const taxasTotal = vendas.reduce((s,m)=>s + (m.taxas||0), 0);
+  // Custo do que já foi vendido — usa o custo "congelado" no momento da
+  // venda (custoNaEpoca), não o custo atual do item, para o lucro
+  // histórico não mudar retroativamente se o custo do item mudar depois
   const custoVendido = vendas.reduce((s,m)=>{
     const item = inventory.find(i=>i.id===m.itemId);
     const custoRef = (m.custoNaEpoca !== undefined) ? m.custoNaEpoca : (item ? item.custo : 0);
     return s + m.qtd*custoRef;
   }, 0);
-  const lucroTotal = receitaTotal - custoVendido;
-  const margemMedia = receitaTotal > 0 ? (lucroTotal/receitaTotal*100) : 0;
+  // Lucro líquido: receita bruta, menos o que foi pago de taxa às plataformas, menos o custo do produto
+  const lucroTotal = receitaTotal - taxasTotal - custoVendido;
+  // Markup médio: lucro líquido como % do CUSTO (não do preço de venda).
+  const margemMedia = custoVendido > 0 ? (lucroTotal/custoVendido*100) : 0;
   const unidadesVendidas = vendas.reduce((s,m)=>s+m.qtd,0);
   const ticketMedio = vendas.length ? receitaTotal/unidadesVendidas : 0;
   const totalUnidadesEstoque = inventory.reduce((s,i)=>s+i.qtd,0);
 
-  return {totalInvestido, receitaTotal, lucroTotal, margemMedia, unidadesVendidas, ticketMedio, totalUnidadesEstoque, vendas, entradasMv};
+  // Potencial do estoque atual: quanto entraria de caixa e de lucro se
+  // TUDO que está em estoque hoje fosse vendido pelo preço de mercado
+  // (expectativa de venda) cadastrado em cada item — é uma projeção, não
+  // um valor realizado.
+  const potencialVenda = inventory.reduce((s,i)=>s + i.qtd*i.preco, 0);
+  const potencialLucro = inventory.reduce((s,i)=>s + i.qtd*(i.preco-i.custo), 0);
+
+  return {totalInvestido, receitaTotal, taxasTotal, lucroTotal, margemMedia, unidadesVendidas, ticketMedio, totalUnidadesEstoque, vendas, entradasMv, potencialVenda, potencialLucro};
 }
 
+// Desenha a aba "Visão Geral": os 4 cards do topo, a lista de insights em
+// texto, a tabela de estoque baixo, e chama renderGiroEstoque() no final
+// para as duas tabelas de giro (parado / vendendo bem).
 function renderDashboard(){
   const m = computeMetrics();
   const cards = document.getElementById('cardsGrid');
@@ -652,14 +1012,29 @@ function renderDashboard(){
       <div class="sub">${m.totalUnidadesEstoque} unidades paradas</div>
     </div>
     <div class="card">
+      <div class="label">Potencial de venda (estoque atual)</div>
+      <div class="value" style="color:var(--blue-light);">${money(m.potencialVenda)}</div>
+      <div class="sub">se vender tudo pelo preço de mercado</div>
+    </div>
+    <div class="card">
+      <div class="label">Lucro potencial (estoque atual)</div>
+      <div class="value ${m.potencialLucro>=0?'profit':'loss'}">${money(m.potencialLucro)}</div>
+      <div class="sub">projeção, ainda não realizada</div>
+    </div>
+    <div class="card">
       <div class="label">Receita acumulada</div>
       <div class="value">${money(m.receitaTotal)}</div>
       <div class="sub">${m.unidadesVendidas} unidades vendidas</div>
     </div>
     <div class="card">
+      <div class="label">Taxas pagas</div>
+      <div class="value loss">${money(m.taxasTotal)}</div>
+      <div class="sub">comissões de plataforma acumuladas</div>
+    </div>
+    <div class="card">
       <div class="label">Lucro acumulado</div>
       <div class="value ${m.lucroTotal>=0?'profit':'loss'}">${money(m.lucroTotal)}</div>
-      <div class="sub">margem média ${fmt(m.margemMedia)}%</div>
+      <div class="sub">markup médio ${fmt(m.margemMedia)}% · já líquido de taxas</div>
     </div>
     <div class="card">
       <div class="label">Ticket médio</div>
@@ -673,11 +1048,36 @@ function renderDashboard(){
   if(m.vendas.length === 0){
     insights.push('Ainda não há vendas registradas — assim que registrar a primeira saída, a margem real (não só a estimada) aparece aqui.');
   } else {
-    // best platform
+    // Comparação de plataformas por LUCRO LÍQUIDO (receita - taxas - custo),
+    // não só por receita bruta — é isso que mostra qual canal compensa mais.
     const byPlat = {};
-    m.vendas.forEach(v=>{ byPlat[v.plataforma] = (byPlat[v.plataforma]||0) + v.qtd*v.valorUnit; });
-    const bestPlat = Object.entries(byPlat).sort((a,b)=>b[1]-a[1])[0];
-    if(bestPlat) insights.push(`<b>${bestPlat[0]}</b> é hoje sua plataforma com maior receita acumulada (${money(bestPlat[1])}).`);
+    m.vendas.forEach(v=>{
+      const item = inventory.find(i=>i.id===v.itemId);
+      const custoRef = v.custoNaEpoca !== undefined ? v.custoNaEpoca : (item?item.custo:0);
+      const receita = v.qtd*v.valorUnit;
+      const taxas = v.taxas||0;
+      const custo = custoRef*v.qtd;
+      const key = v.plataforma || 'Não informado';
+      if(!byPlat[key]) byPlat[key] = {receita:0, taxas:0, custo:0, lucro:0, qtd:0};
+      byPlat[key].receita += receita;
+      byPlat[key].taxas += taxas;
+      byPlat[key].custo += custo;
+      byPlat[key].lucro += (receita - taxas - custo);
+      byPlat[key].qtd += v.qtd;
+    });
+    const platRanked = Object.entries(byPlat).sort((a,b)=>b[1].lucro-a[1].lucro);
+    if(platRanked.length){
+      const [nome, dat] = platRanked[0];
+      const markupPlat = dat.custo>0 ? (dat.lucro/dat.custo*100) : 0;
+      insights.push(`<b>${nome}</b> é hoje sua plataforma mais lucrativa: ${money(dat.lucro)} de lucro líquido em ${dat.qtd} unidade(s) (markup de ${fmt(markupPlat)}%, já descontando taxas).`);
+      if(platRanked.length > 1){
+        const pior = platRanked[platRanked.length-1];
+        if(pior[1].lucro < dat.lucro*0.5){
+          const taxaPct = pior[1].receita>0 ? (pior[1].taxas/pior[1].receita*100) : 0;
+          insights.push(`<b>${pior[0]}</b> está rendendo bem menos (${money(pior[1].lucro)} de lucro líquido${taxaPct>0?`, com taxas consumindo ${fmt(taxaPct)}% da receita`:''}) — vale reavaliar se compensa continuar priorizando esse canal.`);
+        }
+      }
+    }
 
     // best margin item
     const byItem = {};
@@ -686,19 +1086,23 @@ function renderDashboard(){
       const custoRef = v.custoNaEpoca !== undefined ? v.custoNaEpoca : (item?item.custo:0);
       const lucro = (v.valorUnit-custoRef)*v.qtd;
       const rec = v.valorUnit*v.qtd;
-      if(!byItem[v.itemNome]) byItem[v.itemNome] = {lucro:0, receita:0, qtd:0};
+      const cst = custoRef*v.qtd;
+      if(!byItem[v.itemNome]) byItem[v.itemNome] = {lucro:0, receita:0, custo:0, qtd:0};
       byItem[v.itemNome].lucro += lucro;
       byItem[v.itemNome].receita += rec;
+      byItem[v.itemNome].custo += cst;
       byItem[v.itemNome].qtd += v.qtd;
     });
     const ranked = Object.entries(byItem).sort((a,b)=>b[1].lucro-a[1].lucro);
     if(ranked[0]){
       const [nome, dat] = ranked[0];
-      const margem = dat.receita>0 ? (dat.lucro/dat.receita*100) : 0;
-      insights.push(`<b>${nome}</b> é o item mais lucrativo até agora: ${money(dat.lucro)} de lucro em ${dat.qtd} unidade(s) (margem de ${fmt(margem)}%).`);
+      // Markup: lucro como % do custo do item (não do preço de venda)
+      const markup = dat.custo>0 ? (dat.lucro/dat.custo*100) : 0;
+      insights.push(`<b>${nome}</b> é o item mais lucrativo até agora: ${money(dat.lucro)} de lucro em ${dat.qtd} unidade(s) (markup de ${fmt(markup)}%).`);
     }
-    if(m.margemMedia < 15 && m.margemMedia !== 0){
-      insights.push(`Margem média está em ${fmt(m.margemMedia)}% — vale revisar preços ou buscar fornecedores mais baratos para essa faixa.`);
+    // Limiar equivalente a ~15% de margem sobre venda, convertido para markup sobre custo
+    if(m.margemMedia < 18 && m.margemMedia !== 0){
+      insights.push(`Markup médio está em ${fmt(m.margemMedia)}% — vale revisar preços ou buscar fornecedores mais baratos para essa faixa.`);
     }
   }
 
@@ -731,11 +1135,104 @@ function renderDashboard(){
         </tr>`).join('')}
     </tbody></table>`;
   }
+
+  renderGiroEstoque();
+}
+
+// ---------------------------------------------------------------
+// GIRO DE ESTOQUE — o que está parado x o que está vendendo rápido
+// ---------------------------------------------------------------
+// Alimenta os painéis "Parado há mais tempo" e "Vendendo bem — considere
+// repor" na aba Visão Geral. Os três números abaixo são os únicos
+// parâmetros que definem o comportamento — ajuste-os se quiser um
+// alerta mais ou menos sensível para o seu ritmo de vendas.
+function renderGiroEstoque(){
+  const hoje = new Date();
+  const DIAS_PARADO_ALERTA = 45;   // sem venda há mais de X dias = considerado "parado"
+  const JANELA_VELOCIDADE = 30;    // olha as vendas dos últimos X dias para medir o ritmo
+  const LIMIAR_REPOSICAO_DIAS = 14; // se o estoque atual dura menos que X dias no ritmo atual, alerta
+
+  const parados = [];  // itens parados há tempo demais (candidatos a promoção/liquidação)
+  const repor = [];    // itens vendendo rápido, com risco de esgotar em breve
+
+  inventory.forEach(i=>{
+    // Todas as vendas deste item específico, da mais recente para a mais antiga
+    const vendasItem = movements.filter(m=>m.tipo==='saida' && m.itemId===i.id)
+      .sort((a,b)=> new Date(b.data) - new Date(a.data));
+
+    // "Dias parado" conta a partir da venda mais recente. Se o item nunca
+    // foi vendido, conta a partir da primeira vez que ele entrou no estoque.
+    let dataReferencia = null;
+    if(vendasItem.length){
+      dataReferencia = new Date(vendasItem[0].data+'T00:00:00');
+    } else {
+      const entradasItem = movements.filter(m=>m.tipo==='entrada' && m.itemId===i.id)
+        .sort((a,b)=> new Date(a.data) - new Date(b.data));
+      if(entradasItem.length) dataReferencia = new Date(entradasItem[0].data+'T00:00:00');
+    }
+    if(dataReferencia && i.qtd>0){
+      const diasParado = Math.floor((hoje - dataReferencia) / (1000*60*60*24));
+      if(diasParado >= DIAS_PARADO_ALERTA){
+        parados.push({...i, diasParado, capitalParado: i.qtd*i.custo});
+      }
+    }
+
+    // Ritmo de venda: quantas unidades saíram nos últimos 30 dias, dividido
+    // por 30 = média de unidades vendidas por dia. Com isso, estimamos em
+    // quantos dias o estoque atual (i.qtd) vai se esgotar nesse ritmo.
+    const limiteJanela = new Date(hoje.getTime() - JANELA_VELOCIDADE*24*60*60*1000);
+    const vendidasNaJanela = vendasItem
+      .filter(m=> new Date(m.data+'T00:00:00') >= limiteJanela)
+      .reduce((s,m)=>s+m.qtd,0);
+    if(vendidasNaJanela>0){
+      const ritmoDiario = vendidasNaJanela / JANELA_VELOCIDADE;
+      const diasDeCobertura = ritmoDiario>0 ? i.qtd / ritmoDiario : Infinity;
+      if(diasDeCobertura <= LIMIAR_REPOSICAO_DIAS){
+        repor.push({...i, vendidasNaJanela, diasDeCobertura});
+      }
+    }
+  });
+
+  // Mais parado primeiro / menor cobertura (mais urgente) primeiro
+  parados.sort((a,b)=>b.diasParado-a.diasParado);
+  repor.sort((a,b)=>a.diasDeCobertura-b.diasDeCobertura);
+
+  const paradoWrap = document.getElementById('paradoTableWrap');
+  if(parados.length===0){
+    paradoWrap.innerHTML = `<div class="empty">Nenhum item parado há mais de ${DIAS_PARADO_ALERTA} dias. Bom sinal.</div>`;
+  } else {
+    paradoWrap.innerHTML = `<table><thead><tr><th>Item</th><th class="right">Dias sem vender</th><th class="right">Qtd</th><th class="right">Capital parado</th></tr></thead><tbody>
+      ${parados.slice(0,10).map(i=>`
+        <tr>
+          <td data-label="Item">${i.nome}</td>
+          <td data-label="Dias sem vender" class="right num">${i.diasParado}</td>
+          <td data-label="Qtd" class="right num">${i.qtd}</td>
+          <td data-label="Capital parado" class="right num">${money(i.capitalParado)}</td>
+        </tr>`).join('')}
+    </tbody></table>`;
+  }
+
+  const repoWrap = document.getElementById('repoTableWrap');
+  if(repor.length===0){
+    repoWrap.innerHTML = `<div class="empty">Nenhum item em ritmo de esgotar nos próximos ${LIMIAR_REPOSICAO_DIAS} dias.</div>`;
+  } else {
+    repoWrap.innerHTML = `<table><thead><tr><th>Item</th><th class="right">Vendidos (30d)</th><th class="right">Qtd atual</th><th class="right">Cobertura estimada</th></tr></thead><tbody>
+      ${repor.slice(0,10).map(i=>`
+        <tr>
+          <td data-label="Item">${i.nome}</td>
+          <td data-label="Vendidos (30d)" class="right num">${i.vendidasNaJanela}</td>
+          <td data-label="Qtd atual" class="right num">${i.qtd}</td>
+          <td data-label="Cobertura estimada" class="right num">${i.diasDeCobertura.toFixed(0)} dia(s)</td>
+        </tr>`).join('')}
+    </tbody></table>`;
+  }
 }
 
 // ---------------------------------------------------------------
 // RENDER: INVENTORY
 // ---------------------------------------------------------------
+// Desenha a tabela da aba "Estoque" com todos os itens cadastrados,
+// incluindo as etiquetas de atributos extras e o alerta de estoque baixo.
 function renderInventory(){
   const wrap = document.getElementById('inventoryTableWrap');
   if(inventory.length===0){
@@ -744,18 +1241,23 @@ function renderInventory(){
   }
   wrap.innerHTML = `<table><thead><tr>
     <th>Item</th><th>Categoria</th><th class="right">Qtd</th>
-    <th class="right">Custo un.</th><th class="right">Preço venda</th><th class="right">Margem</th><th></th>
+    <th class="right">Custo un.</th><th class="right">Preço venda</th><th class="right">Markup</th><th></th>
   </tr></thead><tbody>
   ${inventory.map(i=>{
-    const margem = i.preco>0 ? ((i.preco-i.custo)/i.preco*100) : 0;
+    // Markup: lucro potencial como % do CUSTO do item (não do preço de venda).
+    // Ex: custo 393,75 / preço 800 → markup = (800-393,75)/393,75 = 103,17%
+    const margem = i.custo>0 ? ((i.preco-i.custo)/i.custo*100) : 0;
     const low = i.qtd<=i.min;
+    const tags = (i.atributos && i.atributos.length)
+      ? `<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;">${i.atributos.map(a=>`<span class="pill" style="font-size:9.5px;">${a.chave}: ${a.valor}</span>`).join('')}</div>`
+      : '';
     return `<tr>
-      <td data-label="Item">${i.nome}${low?' <span class=\"pill low\">baixo</span>':''}</td>
+      <td data-label="Item">${i.nome}${low?' <span class=\"pill low\">baixo</span>':''}${tags}</td>
       <td data-label="Categoria">${i.categoria}</td>
       <td data-label="Qtd" class="right num">${i.qtd}</td>
       <td data-label="Custo un." class="right num">${money(i.custo)}</td>
       <td data-label="Preço venda" class="right num">${money(i.preco)}</td>
-      <td data-label="Margem" class="right num">${fmt(margem)}%</td>
+      <td data-label="Markup" class="right num">${fmt(margem)}%</td>
       <td data-label="" class="row-actions right">
         <button onclick="openItemModal('${i.id}')">editar</button>
         <button onclick="deleteItem('${i.id}')">excluir</button>
@@ -768,6 +1270,10 @@ function renderInventory(){
 // ---------------------------------------------------------------
 // RENDER: MOVEMENTS
 // ---------------------------------------------------------------
+// Desenha a tabela da aba "Movimentações" com o histórico completo de
+// entradas e saídas, mostrando fornecedor (entrada) ou plataforma+conta
+// (venda) na mesma coluna, o cliente e as taxas nas vendas, e sinalizando
+// quando uma compra teve custo adicional.
 function renderMovements(){
   const wrap = document.getElementById('movementsTableWrap');
   if(movements.length===0){
@@ -776,66 +1282,200 @@ function renderMovements(){
   }
   const sorted = [...movements].sort((a,b)=> new Date(b.data) - new Date(a.data));
   wrap.innerHTML = `<table><thead><tr>
-    <th>Data</th><th>Item</th><th>Tipo</th><th class="right">Qtd</th><th class="right">Valor un.</th><th class="right">Total</th><th>Plataforma</th><th></th>
+    <th>Data</th><th>Item</th><th>Tipo</th><th class="right">Qtd</th><th class="right">Valor/custo un.</th><th class="right">Taxas</th><th class="right">Total líquido</th><th>Plataforma / Fornecedor</th><th>Cliente</th><th></th>
   </tr></thead><tbody>
-  ${sorted.map(m=>`
+  ${sorted.map(m=>{
+    const isEntrada = m.tipo==='entrada';
+    const custoAdicionalTotal = (m.custosAdicionais||[]).reduce((s,c)=>s+c.valor,0);
+    const valorUnitDisplay = isEntrada && m.custoEfetivoUnitario!=null ? m.custoEfetivoUnitario : m.valorUnit;
+    const taxas = m.taxas || 0;
+    const totalLiquido = (m.qtd*m.valorUnit) - (isEntrada ? 0 : taxas);
+    const origemDestino = isEntrada
+      ? (m.fornecedor && m.fornecedor.nome ? m.fornecedor.nome : '—')
+      : (m.plataforma || '—');
+    const contaInfo = !isEntrada && m.contaRecebimento
+      ? `<div style="font-size:10px;color:var(--text-dim);margin-top:2px;">Conta: ${m.contaRecebimento}</div>` : '';
+    const clienteInfo = !isEntrada && m.cliente
+      ? `${m.cliente.nome}${m.cliente.telefone ? ' · '+m.cliente.telefone : ''}`
+      : '—';
+    const extraInfo = isEntrada && custoAdicionalTotal>0
+      ? `<div style="font-size:10px;color:var(--text-dim);margin-top:2px;">+ ${money(custoAdicionalTotal)} em custos adicionais</div>` : '';
+    return `
     <tr>
       <td data-label="Data">${new Date(m.data+'T00:00:00').toLocaleDateString('pt-BR')}</td>
       <td data-label="Item">${m.itemNome}</td>
-      <td data-label="Tipo"><span class="pill ${m.tipo==='saida'?'ok':''}">${m.tipo==='entrada'?'entrada':'venda'}</span></td>
+      <td data-label="Tipo"><span class="pill ${m.tipo==='saida'?'ok':''}">${isEntrada?'entrada':'venda'}</span></td>
       <td data-label="Qtd" class="right num">${m.qtd}</td>
-      <td data-label="Valor un." class="right num">${money(m.valorUnit)}</td>
-      <td data-label="Total" class="right num">${money(m.qtd*m.valorUnit)}</td>
-      <td data-label="Plataforma">${m.plataforma||'—'}</td>
+      <td data-label="Valor/custo un." class="right num">${money(valorUnitDisplay)}${extraInfo}</td>
+      <td data-label="Taxas" class="right num">${isEntrada ? '—' : money(taxas)}</td>
+      <td data-label="Total líquido" class="right num">${money(totalLiquido)}</td>
+      <td data-label="Plataforma / Fornecedor">${origemDestino}${contaInfo}</td>
+      <td data-label="Cliente">${clienteInfo}</td>
       <td data-label="" class="row-actions right"><button onclick="deleteMovement('${m.id}')">excluir</button></td>
-    </tr>`).join('')}
+    </tr>`;
+  }).join('')}
   </tbody></table>`;
 }
 
+// Redesenha as três abas de uma vez. Chamada sempre que inventory[] ou
+// movements[] mudam (ou seja, toda vez que os listeners do Firestore
+// recebem uma atualização — a sua ou de outro dispositivo logado).
 function render(){
   renderDashboard();
   renderInventory();
   renderMovements();
+  refreshModeloDatalist();
+}
+
+// Reconstrói a lista de sugestões do campo "Modelo" com todos os valores
+// distintos já usados em algum item do estoque — assim, quanto mais você
+// cadastra, mais completas ficam as sugestões (sem travar o campo numa
+// lista fixa: é sempre possível digitar algo novo).
+function refreshModeloDatalist(){
+  const modelos = [...new Set(inventory.map(i=>i.modelo).filter(Boolean))].sort();
+  document.getElementById('modelo-list').innerHTML =
+    modelos.map(m=>`<option value="${String(m).replace(/"/g,'&quot;')}">`).join('');
+}
+
+// ---------------------------------------------------------------
+// CAMPOS "SELECT + OUTRO" — usados em Tipo do item e Marca, tanto no
+// cadastro completo (aba Estoque) quanto no cadastro rápido (dentro da
+// Entrada). Cada campo desse tipo é composto por dois elementos com o
+// mesmo prefixo: um <select id="PREFIXO-select"> com opções pré-definidas,
+// e um <input id="PREFIXO-outro"> escondido que aparece quando a pessoa
+// escolhe "Outro (especificar)".
+// (O campo "Modelo" NÃO usa esse padrão — é um input de texto livre com
+// sugestões via <datalist>, ver refreshModeloDatalist() acima, porque o
+// modelo varia demais de item pra item pra caber numa lista fixa.)
+// ---------------------------------------------------------------
+
+// Mostra/esconde o campo de texto livre conforme a opção escolhida no select.
+function toggleOutro(prefix){
+  const sel = document.getElementById(prefix+'-select');
+  const outroInput = document.getElementById(prefix+'-outro');
+  const isOutro = sel.value === '__outro__';
+  outroInput.style.display = isOutro ? 'block' : 'none';
+  if(isOutro) outroInput.focus(); else outroInput.value = '';
+}
+
+// Lê o valor "final" do campo: o texto do select, ou o texto digitado
+// em "Outro" quando essa opção estiver selecionada.
+function getFieldValue(prefix){
+  const sel = document.getElementById(prefix+'-select');
+  if(sel.value === '__outro__') return document.getElementById(prefix+'-outro').value.trim();
+  return sel.value;
+}
+
+// Preenche o campo a partir de um valor salvo (ex: ao editar um item).
+// Se o valor bater com uma opção existente, seleciona ela; senão, cai
+// automaticamente em "Outro" e preenche o texto livre com o valor salvo.
+function setFieldValue(prefix, value){
+  const sel = document.getElementById(prefix+'-select');
+  const outroInput = document.getElementById(prefix+'-outro');
+  const existe = Array.from(sel.options).some(o=>o.value===value);
+  if(value && existe){
+    sel.value = value;
+    outroInput.style.display = 'none';
+    outroInput.value = '';
+  } else if(value){
+    sel.value = '__outro__';
+    outroInput.style.display = 'block';
+    outroInput.value = value;
+  } else {
+    sel.value = '';
+    outroInput.style.display = 'none';
+    outroInput.value = '';
+  }
 }
 
 // ---------------------------------------------------------------
 // ITEM MODAL
 // ---------------------------------------------------------------
+// Atributos extras: pares chave/valor livres (Cor: Preto, Armazenamento:
+// 128GB...) que se adaptam a qualquer categoria de produto sem precisar
+// de campos fixos. As três funções abaixo cuidam de criar, limpar e ler
+// essas linhas dinâmicas dentro do formulário de item.
+
+// Adiciona uma linha de atributo (chave + valor) ao formulário de item.
+// Chamada tanto pelo botão "+ Adicionar atributo" (sem argumentos, cria
+// linha vazia) quanto por openItemModal() ao carregar um item existente.
+function addAtributoRow(chave, valor){
+  chave = chave || ''; valor = valor || '';
+  const list = document.getElementById('f-atributos-list');
+  const row = document.createElement('div');
+  row.className = 'atributo-row';
+  row.style = 'display:flex;gap:8px;';
+  row.innerHTML = `
+    <input type="text" class="atributo-chave" placeholder="Ex: Cor" value="${chave.replace(/"/g,'&quot;')}" style="flex:1;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--text);padding:7px 8px;font-family:'IBM Plex Mono',monospace;font-size:12px;">
+    <input type="text" class="atributo-valor" placeholder="Ex: Preto" value="${valor.replace(/"/g,'&quot;')}" style="flex:1;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--text);padding:7px 8px;font-family:'IBM Plex Mono',monospace;font-size:12px;">
+    <button type="button" onclick="this.parentElement.remove()" style="background:none;border:1px solid var(--line);color:var(--text-dim);border-radius:6px;padding:0 12px;cursor:pointer;font-size:14px;">×</button>
+  `;
+  list.appendChild(row);
+}
+// Remove todas as linhas de atributo da tela (usado ao abrir o modal
+// para "Novo item" ou antes de recarregar as linhas de um item existente)
+function clearAtributoRows(){ document.getElementById('f-atributos-list').innerHTML = ''; }
+// Lê todas as linhas de atributo preenchidas na tela e devolve como
+// array [{chave, valor}, ...], pronto para salvar no item. Ignora linhas
+// com chave ou valor vazios.
+function collectAtributos(){
+  const rows = document.querySelectorAll('#f-atributos-list .atributo-row');
+  const atributos = [];
+  rows.forEach(r=>{
+    const chave = r.querySelector('.atributo-chave').value.trim();
+    const valor = r.querySelector('.atributo-valor').value.trim();
+    if(chave && valor) atributos.push({chave, valor});
+  });
+  return atributos;
+}
+
+// Abre o modal de item. Se "id" for passado, carrega os dados desse item
+// para edição (inclusive as linhas de atributos extras); se não, abre em
+// branco para cadastrar um item novo.
 function openItemModal(id){
   editingItemId = id || null;
   document.getElementById('itemModalTitle').textContent = id ? 'Editar item' : 'Novo item';
+  clearAtributoRows();
   if(id){
     const i = inventory.find(x=>x.id===id);
-    document.getElementById('f-marca').value = i.marca || '';
+    setFieldValue('f-marca', i.marca || '');
     document.getElementById('f-modelo').value = i.modelo || i.nome || '';
+    setFieldValue('f-categoria', i.categoria || '');
     document.getElementById('f-variacao').value = i.variacao || '';
-    document.getElementById('f-categoria').value = i.categoria;
     document.getElementById('f-qtd').value = i.qtd;
     document.getElementById('f-custo').value = i.custo;
     document.getElementById('f-preco').value = i.preco;
     document.getElementById('f-min').value = i.min;
     document.getElementById('f-obs').value = i.obs || '';
+    (i.atributos || []).forEach(a=>addAtributoRow(a.chave, a.valor));
   } else {
-    ['f-marca','f-modelo','f-variacao','f-qtd','f-custo','f-preco','f-min','f-obs'].forEach(id=>document.getElementById(id).value='');
-    document.getElementById('f-categoria').value = 'RAM ECC RDIMM';
+    ['f-modelo','f-variacao','f-qtd','f-custo','f-preco','f-min','f-obs'].forEach(id=>document.getElementById(id).value='');
+    setFieldValue('f-marca', '');
+    setFieldValue('f-categoria', 'RAM ECC RDIMM');
     document.getElementById('f-min').value = 2;
   }
   document.getElementById('itemModalBackdrop').classList.add('active');
 }
 function closeItemModal(){ document.getElementById('itemModalBackdrop').classList.remove('active'); }
 
+// Lê todos os campos do formulário de item e salva (cria ou atualiza,
+// dependendo se editingItemId está preenchido). O "nome" exibido nas
+// tabelas é montado automaticamente juntando Marca + Modelo + Variação.
 async function saveItem(){
-  const marca = document.getElementById('f-marca').value.trim();
+  const marca = getFieldValue('f-marca');
   const modelo = document.getElementById('f-modelo').value.trim();
+  const categoria = getFieldValue('f-categoria');
   const variacao = document.getElementById('f-variacao').value.trim();
-  if(!modelo){ toast('Informe ao menos o modelo do item.'); return; }
+  if(!modelo){ toast('Informe o modelo do item.'); return; }
+  if(!categoria){ toast('Informe o tipo do item.'); return; }
   const nome = [marca, modelo, variacao].filter(Boolean).join(' ');
   const data = {
     nome,
     marca,
     modelo,
     variacao,
-    categoria: document.getElementById('f-categoria').value,
+    atributos: collectAtributos(),
+    categoria,
     qtd: Number(document.getElementById('f-qtd').value)||0,
     custo: Number(document.getElementById('f-custo').value)||0,
     preco: Number(document.getElementById('f-preco').value)||0,
@@ -848,6 +1488,8 @@ async function saveItem(){
   toast('Item salvo.');
 }
 
+// Exclui um item do estoque (com confirmação). O histórico de
+// movimentações desse item continua existindo — só o cadastro some.
 async function deleteItem(id){
   if(!confirm('Excluir este item do estoque? O histórico de movimentações relacionado será mantido.')) return;
   await deleteItemDoc(id);
@@ -857,6 +1499,10 @@ async function deleteItem(id){
 // ---------------------------------------------------------------
 // MOVEMENT MODAL
 // ---------------------------------------------------------------
+// Preenche o <select> de itens do modal de movimentação. Na ENTRADA,
+// adiciona no topo a opção especial "+ Cadastrar novo item" (permitindo
+// criar um item novo sem sair da tela de compra); na SAÍDA, essa opção
+// não aparece — só dá para vender o que já existe no estoque.
 function fillItemSelect(){
   const sel = document.getElementById('m-item');
   const options = inventory.map(i=>`<option value="${i.id}">${i.nome} (estoque: ${i.qtd})</option>`).join('');
@@ -868,22 +1514,87 @@ function fillItemSelect(){
   toggleNewItemFields();
 }
 
+// Mostra/esconde o bloco de "cadastro rápido do item novo" conforme a
+// opção selecionada no <select> de itens é ou não "__new__".
 function toggleNewItemFields(){
   const sel = document.getElementById('m-item');
   const isNew = sel.value === '__new__';
   document.getElementById('m-new-item-fields').style.display = isNew ? 'block' : 'none';
 }
 
+// ---------------------------------------------------------------
+// CUSTOS ADICIONAIS (frete, gasolina, uber...) — só na entrada
+// ---------------------------------------------------------------
+// Mesmo padrão dos "atributos extras" do item: linhas dinâmicas de
+// descrição + valor, para lançar quantos custos de logística quiser em
+// cada compra. A soma deles entra no cálculo do custo efetivo por unidade.
+
+// Adiciona uma linha de custo adicional ao formulário de entrada.
+function addCustoRow(descricao, valor){
+  descricao = descricao || ''; valor = (valor===undefined||valor===null) ? '' : valor;
+  const list = document.getElementById('m-custos-list');
+  const row = document.createElement('div');
+  row.className = 'custo-row';
+  row.style = 'display:flex;gap:8px;';
+  row.innerHTML = `
+    <input type="text" class="custo-descricao" placeholder="Ex: Frete" value="${String(descricao).replace(/"/g,'&quot;')}" style="flex:2;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--text);padding:7px 8px;font-family:'IBM Plex Mono',monospace;font-size:12px;" oninput="updateCustoEfetivoPreview()">
+    <input type="number" min="0" step="0.01" class="custo-valor" placeholder="0,00" value="${valor}" style="flex:1;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;color:var(--text);padding:7px 8px;font-family:'IBM Plex Mono',monospace;font-size:12px;" oninput="updateCustoEfetivoPreview()">
+    <button type="button" onclick="this.parentElement.remove();updateCustoEfetivoPreview()" style="background:none;border:1px solid var(--line);color:var(--text-dim);border-radius:6px;padding:0 12px;cursor:pointer;font-size:14px;">×</button>
+  `;
+  list.appendChild(row);
+  updateCustoEfetivoPreview();
+}
+// Remove todas as linhas de custo adicional (chamado ao abrir o modal de
+// movimentação do zero, para não arrastar custos de uma compra anterior)
+function clearCustoRows(){ document.getElementById('m-custos-list').innerHTML = ''; updateCustoEfetivoPreview(); }
+// Lê todas as linhas de custo adicional preenchidas e devolve como array
+// [{descricao, valor}, ...]. Ignora linhas sem descrição ou com valor 0.
+function collectCustos(){
+  const rows = document.querySelectorAll('#m-custos-list .custo-row');
+  const custos = [];
+  rows.forEach(r=>{
+    const descricao = r.querySelector('.custo-descricao').value.trim();
+    const valor = Number(r.querySelector('.custo-valor').value) || 0;
+    if(descricao && valor>0) custos.push({descricao, valor});
+  });
+  return custos;
+}
+// Recalcula e mostra em tempo real o "custo efetivo por unidade" enquanto
+// o usuário preenche a quantidade, o custo do produto e os custos
+// adicionais — antes mesmo de salvar. Fórmula:
+//   (custo do produto × quantidade + soma dos custos adicionais) / quantidade
+function updateCustoEfetivoPreview(){
+  const qtd = Number(document.getElementById('m-qtd').value) || 0;
+  const custoUnit = Number(document.getElementById('m-preco').value) || 0;
+  const somaCustos = collectCustos().reduce((s,c)=>s+c.valor, 0);
+  const efetivo = qtd>0 ? (custoUnit*qtd + somaCustos) / qtd : custoUnit;
+  const el = document.getElementById('m-custo-efetivo');
+  if(el) el.textContent = 'R$ ' + efetivo.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+
+// Alterna entre os modos "Entrada" e "Saída" do modal de movimentação:
+// troca o título, o texto do campo de valor, e mostra/esconde os blocos
+// que só fazem sentido em um dos dois modos (plataforma na venda;
+// custos adicionais + fornecedor na compra).
 function setMoveType(type){
   moveType = type;
   document.getElementById('btnEntrada').classList.toggle('active', type==='entrada');
   document.getElementById('btnSaida').classList.toggle('active', type==='saida');
   document.getElementById('moveModalTitle').textContent = type==='entrada' ? 'Registrar entrada (compra)' : 'Registrar venda (saída)';
-  document.getElementById('m-preco-label').textContent = type==='entrada' ? 'Custo unitário (R$)' : 'Valor de venda unitário (R$)';
+  document.getElementById('m-preco-label').textContent = type==='entrada' ? 'Custo do produto por unidade (R$)' : 'Valor de venda unitário (R$)';
   document.getElementById('m-plataforma-field').style.display = type==='saida' ? 'flex' : 'none';
+  document.getElementById('m-taxas-field').style.display = type==='saida' ? 'flex' : 'none';
+  document.getElementById('m-venda-extra').style.display = type==='saida' ? 'block' : 'none';
+  document.getElementById('m-entrada-extra').style.display = type==='entrada' ? 'block' : 'none';
+  // Botão "Registrar" acompanha a cor semântica: amarelo na entrada, verde na venda
+  document.getElementById('btnRegistrar').classList.toggle('gold', type==='entrada');
   fillItemSelect();
+  updateCustoEfetivoPreview();
 }
 
+// Abre o modal de movimentação já limpo, pronto para um novo registro.
+// "type" define se abre em modo Entrada ou Saída (os botões do painel
+// chamam esta função com 'entrada' ou 'saida' conforme o caso).
 function openMovementModal(type){
   if(inventory.length===0 && (type||'entrada')!=='entrada'){
     toast('Cadastre um item no estoque antes de registrar uma venda.');
@@ -892,38 +1603,88 @@ function openMovementModal(type){
   setMoveType(type||'entrada');
   document.getElementById('m-qtd').value = 1;
   document.getElementById('m-preco').value = '';
+  document.getElementById('m-taxas').value = '';
   document.getElementById('m-obs').value = '';
-  document.getElementById('m-new-marca').value = '';
+  setFieldValue('m-new-categoria', '');
+  setFieldValue('m-new-marca', '');
   document.getElementById('m-new-modelo').value = '';
   document.getElementById('m-new-variacao').value = '';
   document.getElementById('m-new-precoMercado').value = '';
   document.getElementById('m-new-min').value = 2;
+  document.getElementById('m-fornecedor-nome').value = '';
+  document.getElementById('m-fornecedor-contato').value = '';
+  document.getElementById('m-cliente-nome').value = '';
+  document.getElementById('m-cliente-telefone').value = '';
+  setFieldValue('m-conta', '');
+  clearCustoRows();
   document.getElementById('m-data').value = new Date().toISOString().slice(0,10);
   document.getElementById('moveModalBackdrop').classList.add('active');
+  document.getElementById('m-qtd').oninput = updateCustoEfetivoPreview;
+  document.getElementById('m-preco').oninput = updateCustoEfetivoPreview;
 }
 function closeMovementModal(){ document.getElementById('moveModalBackdrop').classList.remove('active'); }
 
+// ---------------------------------------------------------------
+// SALVAR MOVIMENTAÇÃO — a função mais importante do painel.
+// Registra uma compra (entrada) ou venda (saída) e atualiza o estoque.
+//
+// Passo a passo do que acontece aqui:
+//   1. Lê todos os campos da tela (item, quantidade, valor, custos
+//      adicionais, fornecedor, dados do cliente, etc.)
+//   2. Se o item escolhido foi "+ Cadastrar novo item", monta um item
+//      novo na hora com os dados do cadastro rápido (isNewItem=true)
+//   3. Calcula o CUSTO EFETIVO por unidade (só na entrada): custo do
+//      produto + custos adicionais (frete, gasolina, uber...), rateado
+//      pela quantidade comprada
+//   4. Atualiza o estoque do item:
+//      - Item novo: grava direto (documento ainda não existe, sem risco de conflito)
+//      - Item existente: usa uma TRANSAÇÃO do Firestore, que lê a
+//        quantidade/custo direto do servidor no exato momento da gravação
+//        (não confia no que está guardado na tela) e escreve o resultado
+//        de forma atômica. Isso evita perder uma baixa de estoque caso os
+//        dados no navegador estivessem desatualizados por qualquer motivo.
+//   5. Grava a movimentação no histórico
+// ---------------------------------------------------------------
 async function saveMovement(){
+  // --- Passo 1: ler os campos comuns a entrada e saída ---
   const itemId = document.getElementById('m-item').value;
   const qtd = Number(document.getElementById('m-qtd').value);
-  const valorUnit = Number(document.getElementById('m-preco').value);
+  const valorUnit = Number(document.getElementById('m-preco').value); // custo (entrada) ou valor de venda (saída)
   const dataMov = document.getElementById('m-data').value || new Date().toISOString().slice(0,10);
   const obs = document.getElementById('m-obs').value.trim();
+  // Custos adicionais e fornecedor só existem no modo entrada
+  const custosAdicionais = moveType==='entrada' ? collectCustos() : [];
+  const fornecedor = moveType==='entrada' ? {
+    nome: document.getElementById('m-fornecedor-nome').value.trim(),
+    contato: document.getElementById('m-fornecedor-contato').value.trim()
+  } : null;
+  // Dados do cliente só existem no modo venda — e são obrigatórios
+  const clienteNome = document.getElementById('m-cliente-nome').value.trim();
+  const clienteTelefone = document.getElementById('m-cliente-telefone').value.trim();
+  const plataforma = moveType==='saida' ? document.getElementById('m-plataforma').value : '';
+  const taxas = moveType==='saida' ? (Number(document.getElementById('m-taxas').value) || 0) : 0;
+  const contaRecebimento = moveType==='saida' ? getFieldValue('m-conta') : '';
 
+  // --- Passo 2: descobrir qual item está sendo movimentado ---
+  // Se o usuário escolheu "+ Cadastrar novo item", monta um objeto de
+  // item novo agora mesmo, usando os campos do cadastro rápido.
   let item;
   let isNewItem = false;
   if(itemId === '__new__'){
-    const marca = document.getElementById('m-new-marca').value.trim();
+    const marca = getFieldValue('m-new-marca');
     const modelo = document.getElementById('m-new-modelo').value.trim();
+    const categoria = getFieldValue('m-new-categoria');
     const variacao = document.getElementById('m-new-variacao').value.trim();
-    if(!modelo){ toast('Informe ao menos o modelo do item novo.'); return; }
+    if(!modelo){ toast('Informe o modelo do item novo.'); return; }
+    if(!categoria){ toast('Informe o tipo do item novo.'); return; }
     item = {
       id: uid(),
       nome: [marca, modelo, variacao].filter(Boolean).join(' '),
       marca,
       modelo,
       variacao,
-      categoria: document.getElementById('m-new-categoria').value,
+      atributos: [],
+      categoria,
       qtd: 0,
       custo: 0,
       preco: Number(document.getElementById('m-new-precoMercado').value)||0,
@@ -935,13 +1696,77 @@ async function saveMovement(){
     item = inventory.find(i=>i.id===itemId);
   }
 
+  // --- Validações básicas antes de gravar qualquer coisa ---
   if(!item || !qtd || qtd<=0){ toast('Confira o item e a quantidade.'); return; }
   if(isNaN(valorUnit) || valorUnit<0){ toast('Informe um valor válido.'); return; }
+  if(moveType === 'saida'){
+    if(!clienteNome || !clienteTelefone){ toast('Informe nome e telefone do cliente para registrar a venda.'); return; }
+    if(!plataforma){ toast('Informe de onde veio a venda.'); return; }
+    if(!contaRecebimento){ toast('Informe em qual conta você recebeu o valor.'); return; }
+    if(taxas < 0){ toast('O valor de taxas não pode ser negativo.'); return; }
+  }
 
-  if(moveType === 'saida' && qtd > item.qtd){
+  if(moveType === 'saida' && !isNewItem && qtd > item.qtd){
     if(!confirm(`Estoque atual é ${item.qtd} unidade(s), mas você está registrando saída de ${qtd}. Continuar mesmo assim?`)) return;
   }
 
+  // --- Passo 3: calcular o custo efetivo por unidade (só na entrada) ---
+  // Custo efetivo = custo do produto + custos adicionais (frete, gasolina,
+  // uber...) rateados pela quantidade. É esse número — não o custo "puro"
+  // do produto — que representa quanto cada unidade realmente custou.
+  const somaCustosAdicionais = custosAdicionais.reduce((s,c)=>s+c.valor, 0);
+  const custoEfetivoUnitario = moveType==='entrada'
+    ? (qtd>0 ? (valorUnit*qtd + somaCustosAdicionais) / qtd : valorUnit)
+    : null;
+
+  // custoNaEpoca é preenchido de verdade no Passo 4, com o valor lido do
+  // servidor no momento da transação (mais confiável que o dado da tela)
+  let custoNaEpoca = item.custo;
+
+  // --- Passo 4: atualizar o estoque do item ---
+  if(isNewItem){
+    // Documento novo — não existe ainda, então não há risco de conflito
+    // com outra gravação simultânea. Grava direto.
+    const novoQtd = qtd;
+    const novoCusto = custoEfetivoUnitario;
+    const { id, ...itemData } = item;
+    await saveItemDoc(id, {...itemData, qtd: novoQtd, custo: novoCusto});
+    custoNaEpoca = 0;
+  } else {
+    const ref = db.collection('inventory').doc(item.id);
+    try{
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const atual = snap.exists ? snap.data() : {qtd:0, custo:0};
+        const qtdAtual = Number(atual.qtd) || 0;
+        const custoAtual = Number(atual.custo) || 0;
+        custoNaEpoca = custoAtual;
+
+        let novoQtd, novoCusto;
+        if(moveType === 'entrada'){
+          // Custo médio ponderado: mistura o que já tinha em estoque
+          // (lido agora, direto do servidor) com esta nova compra
+          const novoTotal = qtdAtual + qtd;
+          novoCusto = novoTotal>0 ? ((qtdAtual*custoAtual) + (qtd*custoEfetivoUnitario)) / novoTotal : custoEfetivoUnitario;
+          novoQtd = novoTotal;
+        } else {
+          // Venda: só abate a quantidade — o custo médio não muda
+          novoQtd = Math.max(0, qtdAtual - qtd);
+          novoCusto = custoAtual;
+        }
+        tx.set(ref, {qtd: novoQtd, custo: novoCusto}, {merge:true});
+      });
+      // Sincroniza o catálogo público com o resultado final já confirmado
+      const finalSnap = await ref.get();
+      await syncCatalogDoc(item.id, {...item, ...finalSnap.data()});
+    } catch(e){
+      console.error('Erro na transação de estoque', e);
+      toast('Erro ao atualizar o estoque. Tente novamente.');
+      return;
+    }
+  }
+
+  // --- Passo 5: gravar a movimentação no histórico ---
   const mvId = uid();
   const mv = {
     itemId: item.id,
@@ -949,38 +1774,59 @@ async function saveMovement(){
     tipo: moveType,
     qtd,
     valorUnit,
-    plataforma: moveType==='saida' ? document.getElementById('m-plataforma').value : '',
+    taxas,
+    custosAdicionais,
+    custoEfetivoUnitario: custoEfetivoUnitario,
+    fornecedor,
+    cliente: moveType==='saida' ? {nome: clienteNome, telefone: clienteTelefone} : null,
+    plataforma,
+    contaRecebimento,
     data: dataMov,
     obs,
-    custoNaEpoca: item.custo
+    custoNaEpoca   // "congela" o custo médio do item no momento da venda, para a margem histórica não mudar depois
   };
-
-  let novoQtd, novoCusto;
-  if(moveType === 'entrada'){
-    const novoTotal = item.qtd + qtd;
-    novoCusto = novoTotal>0 ? ((item.qtd*item.custo) + (qtd*valorUnit)) / novoTotal : valorUnit;
-    novoQtd = novoTotal;
-  } else {
-    novoQtd = Math.max(0, item.qtd - qtd);
-    novoCusto = item.custo;
-  }
-
-  if(isNewItem){
-    const { id, ...itemData } = item;
-    await saveItemDoc(id, {...itemData, qtd: novoQtd, custo: novoCusto});
-  } else {
-    await saveItemDoc(item.id, {qtd: novoQtd, custo: novoCusto});
-  }
   await saveMovementDoc(mvId, mv);
 
   closeMovementModal();
   toast(moveType==='entrada' ? 'Entrada registrada.' : 'Venda registrada.');
 }
 
+// Exclui uma movimentação do histórico. Importante: isso NÃO desfaz o
+// efeito dela no estoque automaticamente (não soma/subtrai a quantidade
+// de volta) — por isso o aviso no confirm(), pedindo para ajustar o
+// item manualmente na aba Estoque se for o caso.
 async function deleteMovement(id){
   if(!confirm('Excluir esta movimentação? O estoque não será recalculado automaticamente — ajuste o item manualmente se necessário.')) return;
   await deleteMovementDoc(id);
   toast('Movimentação excluída.');
+}
+
+// ---------------------------------------------------------------
+// ZERAR MOVIMENTAÇÕES E ESTOQUE — usado uma vez, pra encerrar os testes
+// e começar a carregar dados reais. Apaga TODOS os documentos da coleção
+// "movements" e zera qtd/custo de cada item em "inventory" (mantendo o
+// resto do cadastro do item intacto: nome, marca, modelo, preço, etc.).
+// Pede confirmação reforçada (digitar "ZERAR") por ser irreversível.
+// ---------------------------------------------------------------
+async function resetMovimentacoes(){
+  const digitado = prompt('Isso vai apagar TODAS as movimentações e zerar o estoque de todos os itens. Essa ação não pode ser desfeita.\n\nPara confirmar, digite ZERAR:');
+  if(digitado !== 'ZERAR'){
+    if(digitado !== null) toast('Confirmação incorreta — nada foi apagado.');
+    return;
+  }
+  toast('Zerando... isso pode levar alguns segundos.');
+  try{
+    // Apaga todas as movimentações
+    await Promise.all(movements.map(m => db.collection('movements').doc(m.id).delete()));
+    // Zera qtd e custo de cada item, mantendo o resto do cadastro
+    await Promise.all(inventory.map(async i => {
+      await saveItemDoc(i.id, {qtd: 0, custo: 0});
+    }));
+    toast('Movimentações e estoque zerados. Pronto pra começar com dados reais.');
+  }catch(e){
+    console.error('Erro ao zerar movimentações', e);
+    toast('Erro ao zerar. Tente novamente.');
+  }
 }
 </script>
 </body>
